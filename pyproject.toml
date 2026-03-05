@@ -29,6 +29,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest", "ruff"]
 
+[dependency-groups]
+dev = ["pytest", "ruff"]
+
 [project.scripts]
 polygon-options-puller = "polygon_options_puller.cli:cli"
 

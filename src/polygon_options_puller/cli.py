@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import os
-from datetime import date
-
 import click
 
 from .config import DATA_TYPES

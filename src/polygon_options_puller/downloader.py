@@ -10,7 +10,7 @@ from tqdm import tqdm
 
 from .config import DATA_TYPES
 from .converter import csv_gz_to_parquet
-from .s3 import download_file, get_s3_client, list_keys
+from .s3 import download_file, get_s3_client
 
 
 def _s3_key_for_date(data_type: str, d: date) -> str:
