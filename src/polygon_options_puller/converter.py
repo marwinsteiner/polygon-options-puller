@@ -1,33 +1,20 @@
-"""Convert Polygon CSV.GZ flat files to Parquet with optimal compression.
+"""Convert Polygon flat-file data to Parquet with optimal compression.
 
-Partitioning strategy
----------------------
-Parquet files are written per (date, underlying_ticker) pair.  This is the
-single biggest lever for disk savings:
-
-* **Columnar storage** – Parquet stores each column contiguously, enabling
-  very efficient dictionary / RLE encoding for the many low-cardinality
-  columns (exchange ids, correction flags, conditions, etc.).
-* **Snappy compression** on top of dictionary-encoded pages typically
-  achieves 80-90 % size reduction vs gzipped CSV for this kind of data.
-* **Underlying-level partitioning** means every file contains only option
-  tickers that share the same root, so the ``ticker`` column compresses
-  even further (common prefix) and users can read only the underlyings
-  they care about without touching the rest.
-
-With this scheme the ~100 TB full options history should compress to well
-under 50 TB (realistic expectation: 15-30 TB).
+Provides Arrow schema definitions, DataFrame→Arrow Table conversion with
+proper typing (timestamps, dictionary encoding), and Parquet validation
+for content-aware idempotency.
 """
 
 from __future__ import annotations
 
-import csv
-import gzip
 import re
+from functools import lru_cache
 from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+
+from .config import TIMESTAMP_COLUMNS
 
 # --------------------------------------------------------------------------- #
 # Option-ticker parsing
@@ -129,147 +116,90 @@ SCHEMAS: dict[str, pa.Schema] = {
 }
 
 # --------------------------------------------------------------------------- #
-# CSV → grouped rows
+# Output schema (timestamps converted from int64 → timestamp)
 # --------------------------------------------------------------------------- #
 
-# How many CSV rows to accumulate before flushing a per-underlying batch to
-# Parquet.  Larger values use more RAM but produce fewer, bigger row-groups.
-_BATCH_FLUSH_ROWS = 500_000
+_TS_TYPE = pa.timestamp("ns", tz="UTC")
 
 
-def _parse_value(value: str, field: pa.Field):
-    """Coerce a single CSV string *value* according to the Arrow *field* type."""
-    if value == "" or value == "null":
-        return None
-
-    base_type = field.type
-    # Unwrap dictionary types to their value type for parsing.
-    if pa.types.is_dictionary(base_type):
-        base_type = base_type.value_type
-
-    if pa.types.is_boolean(base_type):
-        return value.lower() in ("true", "1", "t")
-    if pa.types.is_floating(base_type):
-        return float(value)
-    if pa.types.is_integer(base_type):
-        # Handle potential floats like "3.0" in integer columns.
-        return int(float(value))
-    # Default: keep as string (covers conditions, ticker, etc.)
-    return value
-
-
-def _rows_to_table(rows: list[dict], schema: pa.Schema) -> pa.Table:
-    """Convert a list of row-dicts into an Arrow Table with *schema*."""
-    arrays = {}
-    for field in schema:
-        raw = [_parse_value(row.get(field.name, ""), field) for row in rows]
-        base_type = field.type
-        if pa.types.is_dictionary(base_type):
-            arr = pa.array(raw, type=base_type.value_type)
-            arrays[field.name] = arr.dictionary_encode()
+@lru_cache(maxsize=4)
+def get_output_schema(data_type: str) -> pa.Schema:
+    """Return the output Parquet schema with timestamp columns converted."""
+    base = SCHEMAS[data_type]
+    ts_cols = set(TIMESTAMP_COLUMNS.get(data_type, []))
+    fields = []
+    for field in base:
+        if field.name in ts_cols:
+            fields.append(pa.field(field.name, _TS_TYPE))
         else:
-            arrays[field.name] = pa.array(raw, type=base_type)
-    return pa.table(arrays, schema=schema)
+            fields.append(field)
+    return pa.schema(fields)
 
 
 # --------------------------------------------------------------------------- #
-# Public API
+# DataFrame → Arrow Table
 # --------------------------------------------------------------------------- #
 
 
-def csv_gz_to_parquet(
-    csv_gz_path: str | Path,
-    output_dir: str | Path,
-    data_type: str,
-    date_str: str,
-    *,
-    underlying_filter: str | None = None,
-) -> list[Path]:
-    """Read a gzipped CSV flat file and write per-underlying Parquet files.
+def dataframe_to_table(df, data_type: str) -> pa.Table:
+    """Convert a pandas DataFrame chunk to an Arrow Table with the output schema.
 
-    Parameters
-    ----------
-    csv_gz_path:
-        Path to the downloaded ``.csv.gz`` file.
-    output_dir:
-        Root directory for Parquet output.  Files are written as
-        ``{output_dir}/{data_type}/{date}/{underlying}.parquet``.
-    data_type:
-        One of ``trades``, ``quotes``, ``day_aggs``, ``minute_aggs``.
-    date_str:
-        ISO date string (``YYYY-MM-DD``) used in the output path.
-    underlying_filter:
-        If set, only rows whose underlying matches this ticker are kept.
-
-    Returns
-    -------
-    List of Parquet file paths that were written.
+    Handles timestamp conversion, dictionary encoding, and type coercion.
     """
-    csv_gz_path = Path(csv_gz_path)
-    output_dir = Path(output_dir)
-    schema = SCHEMAS[data_type]
+    import pandas as pd
 
-    written: list[Path] = []
+    output_schema = get_output_schema(data_type)
+    ts_cols = set(TIMESTAMP_COLUMNS.get(data_type, []))
 
-    # Accumulate rows keyed by underlying.
-    buckets: dict[str, list[dict]] = {}
-    total_buffered = 0
+    arrays = []
+    for field in output_schema:
+        col_name = field.name
+        if col_name not in df.columns:
+            arrays.append(pa.nulls(len(df), type=field.type))
+            continue
 
-    def _flush(force_all: bool = False):
-        nonlocal total_buffered
-        for underlying, rows in list(buckets.items()):
-            if not force_all and len(rows) < _BATCH_FLUSH_ROWS:
-                continue
-            _write_batch(rows, underlying, schema, data_type, date_str, output_dir, written)
-            total_buffered -= len(rows)
-            del buckets[underlying]
+        values = df[col_name]
 
-    with gzip.open(csv_gz_path, "rt", newline="") as fh:
-        reader = csv.DictReader(fh)
-        for row in reader:
-            ticker = row.get("ticker", "")
-            underlying = extract_underlying(ticker)
+        if col_name in ts_cols:
+            ts_series = pd.to_datetime(values, unit="ns", utc=True)
+            arrays.append(pa.array(ts_series, type=_TS_TYPE))
+        elif pa.types.is_dictionary(field.type):
+            value_type = field.type.value_type
+            arr = pa.array(values, type=value_type)
+            arrays.append(arr.dictionary_encode())
+        else:
+            arrays.append(pa.array(values, type=field.type))
 
-            if underlying_filter and underlying != underlying_filter:
-                continue
-
-            buckets.setdefault(underlying, []).append(row)
-            total_buffered += 1
-
-            if total_buffered >= _BATCH_FLUSH_ROWS * 4:
-                _flush()
-
-    # Flush remaining rows.
-    _flush(force_all=True)
-
-    return written
+    return pa.table(arrays, schema=output_schema)
 
 
-def _write_batch(
-    rows: list[dict],
-    underlying: str,
-    schema: pa.Schema,
-    data_type: str,
-    date_str: str,
-    output_dir: Path,
-    written: list[Path],
-) -> None:
-    table = _rows_to_table(rows, schema)
+# --------------------------------------------------------------------------- #
+# Parquet validation for idempotency
+# --------------------------------------------------------------------------- #
 
-    dest_dir = output_dir / data_type / f"date={date_str}" / f"underlying={underlying}"
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    dest_path = dest_dir / "data.parquet"
 
-    if dest_path.exists():
-        existing = pq.read_table(dest_path)
-        table = pa.concat_tables([existing, table])
+def validate_parquet(path: Path, symbol_prefix: str, min_rows: int = 1000) -> bool:
+    """Check that an existing Parquet file is valid for the given symbol prefix.
 
-    pq.write_table(
-        table,
-        dest_path,
-        compression="snappy",
-        use_dictionary=True,
-        write_statistics=True,
-    )
-    if dest_path not in written:
-        written.append(dest_path)
+    Returns False if the file is missing, unreadable, has fewer than *min_rows*,
+    or contains tickers that don't start with ``O:{symbol_prefix}``.
+    """
+    if not path.exists():
+        return False
+    try:
+        pf = pq.ParquetFile(path)
+        if pf.metadata.num_rows < min_rows:
+            return False
+        # Read only the ticker column for efficiency.
+        ticker_table = pf.read(columns=["ticker"])
+        tickers = ticker_table.column("ticker")
+        # Combine chunks and handle dictionary encoding.
+        combined = tickers.combine_chunks()
+        if pa.types.is_dictionary(combined.type):
+            unique_tickers = combined.dictionary_decode().unique().to_pylist()
+        else:
+            unique_tickers = combined.unique().to_pylist()
+        expected_prefix = f"O:{symbol_prefix}"
+        return all(t.startswith(expected_prefix) for t in unique_tickers if t is not None)
+    except Exception:
+        return False
