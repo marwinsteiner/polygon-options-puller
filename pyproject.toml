@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "polygon-options-puller"
-version = "0.1.0"
+version = "0.2.0"
 description = "Download Polygon (Massive) options flat files from S3 and store as compressed Parquet"
 readme = "README.md"
 license = "MIT"
