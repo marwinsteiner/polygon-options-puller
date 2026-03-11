@@ -5,6 +5,15 @@ from __future__ import annotations
 S3_ENDPOINT = "https://files.massive.com"
 S3_BUCKET = "flatfiles"
 
+# Columns that contain nanosecond-epoch timestamps and should be stored as
+# pa.timestamp("ns", tz="UTC") in output Parquet files.
+TIMESTAMP_COLUMNS: dict[str, list[str]] = {
+    "trades": ["sip_timestamp", "participant_timestamp"],
+    "quotes": ["sip_timestamp"],
+    "day_aggs": [],
+    "minute_aggs": ["timestamp"],
+}
+
 # Top-level prefix for US options OPRA data inside the bucket.
 OPTIONS_PREFIX = "us_options_opra"
 
