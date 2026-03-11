@@ -2,24 +2,22 @@
 
 Download [Polygon / Massive](https://massive.com) US options (OPRA) flat files
 from their S3 bucket and store them locally as Snappy-compressed,
-dictionary-encoded **Parquet** files, partitioned by **date** and **underlying
-ticker**.
+dictionary-encoded **Parquet** files, filtered by **symbol prefix**.
 
-## Why Parquet?
+## How it works
 
 Polygon ships daily `.csv.gz` files containing *all* option tickers for an
-entire trading day.  The full quote history is roughly **100 TB** in this
-format.  Converting to Parquet with the right settings cuts that dramatically:
+entire trading day.  The quote files alone are ~120 GB compressed each.
+This tool **streams** each file directly from S3, filters to your symbol prefix
+in-flight, and writes only matching rows to Parquet — no temp files, no
+downloading 120 GB just to keep 500 MB.
 
-| Lever | Savings |
-|---|---|
-| **Columnar layout** – values of the same type stored together compress far better than row-oriented CSV | ~3-4× |
-| **Dictionary encoding** – exchange IDs, tickers, correction flags are tiny enum-like columns that dictionary-encode to a few bytes per value | ~2-3× on those columns |
-| **Snappy compression** on top of the above | additional ~1.5-2× |
-| **Underlying-based partitioning** – all option tickers for a given root (e.g. all AAPL options) land in the same file, concentrating similar data | better dictionary & RLE hits |
-
-Realistic total: **5-10×** smaller than gzipped CSV → **~10-20 TB** for the
-full history.
+Key features:
+- **Streaming**: decompresses and filters in-flight, never writes the full CSV to disk
+- **Parallel**: uses a thread pool to download multiple days concurrently
+- **NYSE-aware**: uses `pandas_market_calendars` to skip holidays and weekends
+- **Idempotent**: re-running skips days that already have valid Parquet files
+- **Atomic writes**: uses temp files + `os.replace()` to prevent corrupt output
 
 ## Installation
 
@@ -34,8 +32,6 @@ pip install -e ".[dev]"
 You need Polygon / Massive S3 credentials.  Get them from your
 [Massive dashboard](https://massive.com/dashboard).
 
-Set them as environment variables or pass them as CLI flags:
-
 ```bash
 export POLYGON_S3_ACCESS_KEY="your-access-key"
 export POLYGON_S3_SECRET_KEY="your-secret-key"
@@ -46,20 +42,38 @@ export POLYGON_S3_SECRET_KEY="your-secret-key"
 ### Download data
 
 ```bash
-# Download yesterday's quotes for all underlyings
-polygon-options-puller download
-
-# Download AAPL option quotes for a specific date range
+# Download AAPL option quotes for a date range
 polygon-options-puller download \
-    --underlying AAPL \
-    --start-date 2024-03-01 \
-    --end-date 2024-03-31
+    --symbol-prefix AAPL \
+    -t quotes \
+    --start-date 2025-03-17 \
+    --end-date 2025-03-21 \
+    -o ./data/aapl
 
-# Download trades instead of quotes
-polygon-options-puller download -t trades --underlying SPY --start-date 2024-06-01
+# Download SPXW trades with 16 workers
+polygon-options-puller download \
+    --symbol-prefix SPXW \
+    -t trades \
+    --start-date 2025-04-01 \
+    --end-date 2025-04-30 \
+    -o ./data/spxw \
+    --workers 16
+
+# Download both trades and quotes
+polygon-options-puller download \
+    --symbol-prefix SPY \
+    -t both \
+    --start-date 2025-04-01 \
+    --end-date 2025-04-02 \
+    -o ./data/spy
 
 # Download minute aggregates
-polygon-options-puller download -t minute_aggs --start-date 2024-01-02
+polygon-options-puller download \
+    --symbol-prefix AAPL \
+    -t minute_aggs \
+    --start-date 2025-01-02 \
+    --end-date 2025-01-02 \
+    -o ./data/aapl
 ```
 
 ### List available dates
@@ -81,31 +95,33 @@ from polygon_options_puller.downloader import pull
 written = pull(
     access_key="your-key",
     secret_key="your-secret",
-    output_dir="data",
-    data_type="quotes",
-    underlying="AAPL",
-    start_date=date(2024, 3, 1),
-    end_date=date(2024, 3, 1),
+    output_dir="data/aapl",
+    data_types=["quotes"],
+    symbol_prefix="AAPL",
+    start_date=date(2025, 3, 17),
+    end_date=date(2025, 3, 21),
+    workers=8,
 )
 ```
 
 ## Output layout
 
 ```
-data/
-└── quotes/
-    └── date=2024-03-01/
-        ├── underlying=AAPL/
-        │   └── data.parquet
-        ├── underlying=SPY/
-        │   └── data.parquet
-        └── underlying=TSLA/
-            └── data.parquet
+data/aapl/
+├── quotes/
+│   ├── 2025-03-17.parquet
+│   ├── 2025-03-18.parquet
+│   ├── 2025-03-19.parquet
+│   ├── 2025-03-20.parquet
+│   └── 2025-03-21.parquet
+└── trades/
+    ├── 2025-03-17.parquet
+    └── ...
 ```
 
-Partitioning by `date` then `underlying` means you only touch the files you
-need, and each file's columns are extremely homogeneous—ideal for Parquet's
-dictionary and RLE encoders.
+Each Parquet file contains only rows matching the `--symbol-prefix` you
+specified.  Namespace different underlyings by using different `--output-dir`
+paths.
 
 ## Data types
 
