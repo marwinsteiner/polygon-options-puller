@@ -17,7 +17,11 @@ def get_s3_client(access_key: str, secret_key: str):
     return session.client(
         "s3",
         endpoint_url=S3_ENDPOINT,
-        config=Config(signature_version="s3v4"),
+        config=Config(
+            signature_version="s3v4",
+            read_timeout=600,
+            retries={"max_attempts": 3},
+        ),
     )
 
 
@@ -31,6 +35,6 @@ def list_keys(s3_client, prefix: str) -> list[str]:
     return keys
 
 
-def download_file(s3_client, key: str, dest: str) -> None:
-    """Download a single S3 object to a local path."""
-    s3_client.download_file(S3_BUCKET, key, dest)
+def get_streaming_body(s3_client, key: str):
+    """Return a streaming body for a single S3 object (no temp file needed)."""
+    return s3_client.get_object(Bucket=S3_BUCKET, Key=key)["Body"]
