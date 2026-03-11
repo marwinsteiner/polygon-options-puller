@@ -12,9 +12,9 @@ from .downloader import pull
 def cli():
     """Polygon / Massive options flat-file downloader.
 
-    Downloads gzipped CSV flat files from the Polygon (Massive) S3 bucket and
-    converts them to Snappy-compressed, dictionary-encoded Parquet files
-    partitioned by date and underlying ticker.
+    Downloads gzipped CSV flat files from the Polygon (Massive) S3 bucket,
+    streams and filters them by symbol prefix, and writes the matching rows
+    as Snappy-compressed, dictionary-encoded Parquet files.
     """
 
 
@@ -34,58 +34,79 @@ def cli():
 @click.option(
     "-o",
     "--output-dir",
-    default="data",
-    show_default=True,
+    required=True,
     type=click.Path(),
     help="Root directory for Parquet output.",
 )
 @click.option(
     "-t",
     "--data-type",
-    type=click.Choice(list(DATA_TYPES)),
+    type=click.Choice(list(DATA_TYPES) + ["both"]),
     default="quotes",
     show_default=True,
-    help="Which flat-file dataset to pull.",
+    help="Which flat-file dataset to pull. 'both' pulls trades and quotes.",
 )
 @click.option(
-    "-u",
-    "--underlying",
-    default=None,
-    help="Only download data for this underlying ticker (e.g. AAPL, SPY).",
+    "--symbol-prefix",
+    required=True,
+    help="Underlying symbol prefix to filter on (e.g. SPXW, AAPL, SPY).",
 )
 @click.option(
     "--start-date",
     type=click.DateTime(formats=["%Y-%m-%d"]),
-    default=None,
-    help="Start date (YYYY-MM-DD). Defaults to yesterday.",
+    required=True,
+    help="Start date (YYYY-MM-DD).",
 )
 @click.option(
     "--end-date",
     type=click.DateTime(formats=["%Y-%m-%d"]),
-    default=None,
-    help="End date (YYYY-MM-DD). Defaults to yesterday.",
+    required=True,
+    help="End date (YYYY-MM-DD).",
+)
+@click.option(
+    "--workers",
+    type=int,
+    default=8,
+    show_default=True,
+    help="Number of parallel download threads.",
+)
+@click.option(
+    "--min-rows",
+    type=int,
+    default=1000,
+    show_default=True,
+    help="Minimum rows for a Parquet file to be considered valid (idempotency check).",
 )
 def download(
     access_key: str,
     secret_key: str,
     output_dir: str,
     data_type: str,
-    underlying: str | None,
+    symbol_prefix: str,
     start_date,
     end_date,
+    workers: int,
+    min_rows: int,
 ):
-    """Download flat files and convert to Parquet."""
-    start = start_date.date() if start_date else None
-    end = end_date.date() if end_date else None
+    """Download flat files, stream-filter by symbol, and write Parquet."""
+    start = start_date.date()
+    end = end_date.date()
+
+    if data_type == "both":
+        data_types = ["trades", "quotes"]
+    else:
+        data_types = [data_type]
 
     written = pull(
         access_key=access_key,
         secret_key=secret_key,
         output_dir=output_dir,
-        data_type=data_type,
-        underlying=underlying,
+        data_types=data_types,
+        symbol_prefix=symbol_prefix,
         start_date=start,
         end_date=end,
+        workers=workers,
+        min_rows=min_rows,
     )
     click.echo(f"\nDone. Wrote {len(written)} parquet file(s) to {output_dir}/")
 
@@ -123,7 +144,9 @@ def download(
     default=None,
     help="Only list dates for this month (requires --year).",
 )
-def list_dates(access_key: str, secret_key: str, data_type: str, year: int | None, month: int | None):
+def list_dates(
+    access_key: str, secret_key: str, data_type: str, year: int | None, month: int | None
+):
     """List available dates for a flat-file dataset."""
     from .s3 import get_s3_client, list_keys
 
