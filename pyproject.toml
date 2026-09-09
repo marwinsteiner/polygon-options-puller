@@ -67,3 +67,7 @@ packages = ["src/polygon_options_puller"]
 [tool.ruff]
 target-version = "py310"
 line-length = 100
+
+[tool.ruff.lint]
+# Pin the rule set explicitly so results do not change between ruff releases.
+select = ["E4", "E7", "E9", "F"]
