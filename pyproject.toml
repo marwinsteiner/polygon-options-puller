@@ -4,38 +4,62 @@ build-backend = "hatchling.build"
 
 [project]
 name = "polygon-options-puller"
-version = "0.2.0"
-description = "Download Polygon (Massive) options flat files from S3 and store as compressed Parquet"
+dynamic = ["version"]
+description = "Pull any Polygon (Massive) flat file from S3 and store it locally as Parquet, Feather, CSV, JSONL or a raw mirror"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 authors = [{ name = "marwi" }]
-keywords = ["polygon", "massive", "options", "parquet", "market-data", "OPRA"]
+keywords = [
+    "polygon",
+    "massive",
+    "flat-files",
+    "market-data",
+    "stocks",
+    "options",
+    "OPRA",
+    "crypto",
+    "forex",
+    "parquet",
+    "cold-storage",
+]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Financial and Insurance Industry",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Office/Business :: Financial :: Investment",
+    "Topic :: System :: Archiving",
 ]
 
 dependencies = [
     "boto3>=1.28",
-    "pyarrow>=14.0",
+    "pyarrow>=16.0",
     "click>=8.0",
     "tqdm>=4.60",
-    "pandas>=2.0",
-    "pandas_market_calendars>=4.0",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest", "ruff"]
 
+[project.urls]
+Homepage = "https://github.com/marwinsteiner/polygon-options-puller"
+Repository = "https://github.com/marwinsteiner/polygon-options-puller"
+Issues = "https://github.com/marwinsteiner/polygon-options-puller/issues"
+
 [dependency-groups]
 dev = ["pytest", "ruff"]
 
 [project.scripts]
+polygon-puller = "polygon_options_puller.cli:cli"
 polygon-options-puller = "polygon_options_puller.cli:cli"
+
+[tool.hatch.version]
+path = "src/polygon_options_puller/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/polygon_options_puller"]
